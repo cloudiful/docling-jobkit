@@ -378,6 +378,18 @@ class TestLocalQueuedCancellation:
         assert await orchestrator.get_queue_position(first.task_id) == 1
         assert await orchestrator.queue_size() == 1
 
+    @pytest.mark.asyncio
+    async def test_cancelled_task_is_excluded_from_active_list(self):
+        orchestrator, _ = _local_orchestrator()
+        first, cancelled = await self._enqueue(orchestrator, 2)
+
+        await orchestrator.cancel_queued_task(cancelled.task_id)
+
+        page = await orchestrator.list_tasks(tenant_id="default")
+
+        assert [item.task_id for item in page.items] == [first.task_id]
+        assert page.has_more is False
+
 
 class TestRqQueuedCancellation:
     """RQ arbitration happens in Redis, so these tests need a real server."""
@@ -531,6 +543,19 @@ class TestRqQueuedCancellation:
         assert polled.task_status == TaskStatus.CANCELLED
         await orch._update_task_from_rq(task.task_id)
         assert orch.tasks[task.task_id].task_status == TaskStatus.CANCELLED
+
+    @pytest.mark.asyncio
+    async def test_cancelled_task_is_excluded_from_active_list(self, orchestrator):
+        orch, created = orchestrator
+        live = await self._enqueue(orch, created)
+        cancelled = await self._enqueue(orch, created)
+
+        await orch.cancel_queued_task(cancelled.task_id)
+
+        page = await orch.list_tasks(tenant_id="default")
+
+        assert [item.task_id for item in page.items] == [live.task_id]
+        assert page.has_more is False
 
     @pytest.mark.asyncio
     async def test_cancellation_is_visible_to_another_instance(
@@ -1225,6 +1250,74 @@ class TestRayQueuedCancellation:
         assert await manager.get_task_outcome(task.task_id) is None
         counters = await manager.get_tenant_task_counters(tenant_id)
         assert counters.tasks_succeeded_total == 0
+
+    @pytest.mark.asyncio
+    async def test_timeout_failure_and_user_cancel_first_terminal_wins(
+        self, manager, token
+    ):
+        from docling.datamodel.service.responses import (
+            FailureCategory,
+            FailurePhase,
+            PublicFailureInfo,
+        )
+
+        from docling_jobkit.orchestrators.ray.models import TaskCancellationOutcome
+
+        def _timeout_failure() -> PublicFailureInfo:
+            return PublicFailureInfo(
+                category=FailureCategory.INTERNAL,
+                message="converter_request_timeout",
+                retryable=False,
+                phase=FailurePhase.ORCHESTRATION,
+            )
+
+        tenant_id = f"cancel72-{token}"
+        # Timeout failure first: the terminal FAILURE wins and a late user
+        # cancel conflicts instead of resurrecting the task.
+        (timed_out,) = await self._enqueue(manager, tenant_id)
+        failure = await manager.finalize_task_failure_atomic(
+            tenant_id=tenant_id,
+            task_id=timed_out.task_id,
+            task_size=0,
+            error_message="converter_request_timeout",
+            failure=_timeout_failure(),
+        )
+        assert failure.status_changed is True
+        assert failure.final_status is TaskStatus.FAILURE
+        late_cancel = await manager.cancel_queued_task_atomic(timed_out.task_id)
+        assert late_cancel.outcome is TaskCancellationOutcome.CONFLICT
+        assert late_cancel.status is TaskStatus.FAILURE
+        metadata = await manager.get_task_metadata_model(timed_out.task_id)
+        assert metadata is not None
+        assert metadata.status is TaskStatus.FAILURE
+        assert await manager.get_task_outcome(timed_out.task_id) is not None
+
+        # User cancel first: CANCELLED wins, a late timeout failure cannot
+        # overwrite it, and no converter unit may be granted afterwards.
+        (cancelled,) = await self._enqueue(manager, tenant_id)
+        first = await manager.cancel_queued_task_atomic(cancelled.task_id)
+        assert first.outcome is TaskCancellationOutcome.CANCELLED
+        late_failure = await manager.finalize_task_failure_atomic(
+            tenant_id=tenant_id,
+            task_id=cancelled.task_id,
+            task_size=0,
+            error_message="converter_request_timeout",
+            failure=_timeout_failure(),
+        )
+        assert late_failure.status_changed is False
+        assert late_failure.final_status is TaskStatus.CANCELLED
+        metadata = await manager.get_task_metadata_model(cancelled.task_id)
+        assert metadata is not None
+        assert metadata.status is TaskStatus.CANCELLED
+        assert await manager.get_task_outcome(cancelled.task_id) is None
+        lease_written = await manager.write_task_execution_lease(
+            cancelled.task_id, tenant_id, "replica-a"
+        )
+        granted = await manager.acquire_converter_unit(
+            tenant_id, cancelled.task_id, ceiling=2
+        )
+        assert lease_written is False
+        assert granted == -1
 
     @pytest.mark.asyncio
     async def test_cancellation_is_visible_to_another_instance(self, manager, token):
