@@ -683,7 +683,8 @@ claim, preserving the committed `started_at`. Same-status refresh preserves
 status writer (`mark_task_started`, `update_task_status`, `set_task_metadata`,
 `dispatch_task_atomic`, `finalize_task_*_atomic`, `cancel_queued_task_atomic`)
 shares that rule, so a started task can never go back to queued and a cancelled
-task can never come back to life.
+task can never come back to life. These guarantees apply to the persisted Redis
+state, not local pub/sub caches.
 
 Execution-lease and converter-unit authorization additionally requires the
 authoritative committed STARTED claim: `write_task_execution_lease` grants a

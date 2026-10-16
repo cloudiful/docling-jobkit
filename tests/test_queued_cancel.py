@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 """Queued-only cancellation: atomic claim-vs-cancel arbitration in all engines.
 
 Every conversion in these tests is a deterministic fake, so no model is
@@ -1272,8 +1274,8 @@ class TestRayQueuedCancellation:
             )
 
         tenant_id = f"cancel72-{token}"
-        # Timeout failure first: the terminal FAILURE wins and a late user
-        # cancel conflicts instead of resurrecting the task.
+        # Timeout failure first: terminal FAILURE wins and a late user cancel
+        # conflicts instead of resurrecting the task.
         (timed_out,) = await self._enqueue(manager, tenant_id)
         failure = await manager.finalize_task_failure_atomic(
             tenant_id=tenant_id,
