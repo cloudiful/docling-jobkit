@@ -7,7 +7,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
-from docling.datamodel.service.callbacks import ProcessedDocsItem
+from docling.datamodel.service.callbacks import CallbackSpec, ProcessedDocsItem
 from docling.datamodel.service.options import ConvertDocumentsOptions
 from docling.datamodel.service.responses import PublicFailureInfo
 from docling.datamodel.service.tasks import TaskProcessingMeta, TaskType
@@ -250,12 +250,16 @@ class TaskCancellationResult:
 
     ``status`` is the durable status that made the cancellation impossible for
     a conflict; it is also set for an idempotent repeat so callers can report it.
+    ``callbacks`` carries the winner's callback specs, captured before the
+    atomic transition deletes their queue payload / dispatch hash, so the
+    orchestrator can announce the cancellation once outside the lock.
     """
 
     outcome: TaskCancellationOutcome
     status: Optional[TaskStatus] = None
     queue_entry_removed: bool = False
     reservation_released: bool = False
+    callbacks: tuple[CallbackSpec, ...] = ()
 
 
 class SliceSpec(BaseModel):

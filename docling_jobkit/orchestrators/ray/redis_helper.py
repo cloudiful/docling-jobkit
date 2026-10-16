@@ -57,6 +57,22 @@ _TERMINAL_STATUSES = frozenset(
     }
 )
 
+
+def _decode_queued_payload_callbacks(payload: str) -> list[CallbackSpec]:
+    """Read callback specs from a tenant queue payload.
+
+    Returns an empty list for a payload without callbacks or with an
+    unparseable shape: a client notification is best-effort and must never
+    block cancellation.
+    """
+    try:
+        raw = json.loads(payload).get("callbacks") or []
+        return [CallbackSpec.model_validate(entry) for entry in raw]
+    except (AttributeError, TypeError, ValueError, ValidationError) as exc:
+        _log.warning("Could not decode queued task callbacks: %s", exc)
+        return []
+
+
 _UPDATE_TASK_EXECUTION_HEARTBEAT_LUA = """
 if redis.call('EXISTS', KEYS[1]) == 1 then
     redis.call('HSET', KEYS[1], 'heartbeat_at', ARGV[1])
@@ -1472,6 +1488,9 @@ class RedisStateManager:
                         )
 
                     payload = await self._find_queued_task_payload(tenant_id, task_id)
+                    callbacks = await self._capture_queued_cancellation_callbacks(
+                        task_id=task_id, queued_payload=payload
+                    )
                     was_active = bool(
                         await redis.sismember(active_key, task_id)  # type: ignore[misc]
                     )
@@ -1526,11 +1545,29 @@ class RedisStateManager:
                         status=TaskStatus.CANCELLED,
                         queue_entry_removed=payload is not None,
                         reservation_released=was_active,
+                        callbacks=tuple(callbacks),
                     )
                 except WatchError:
                     # A dispatch, a claim, or another cancellation committed in
                     # between; re-read the durable state and decide again.
                     continue
+
+    async def _capture_queued_cancellation_callbacks(
+        self, *, task_id: str, queued_payload: Optional[str]
+    ) -> list[CallbackSpec]:
+        """Capture a queued task's callback specs before cancellation deletes them.
+
+        A task that has not been dispatched keeps its specs in the tenant queue
+        payload; once dispatched they survive only in the TTL-bounded dispatch
+        hash, which the cancellation transaction deletes. Both are read while
+        the caller still holds the pending-only WATCH, so the captured specs
+        belong to the exact task the winning transaction cancels. A missing or
+        unreadable source yields no callbacks instead of blocking cancellation.
+        """
+        if queued_payload is not None:
+            return _decode_queued_payload_callbacks(queued_payload)
+        dispatch_hash = await self.get_task_dispatch_hash(task_id)
+        return self.decode_dispatch_callbacks(dispatch_hash)
 
     async def _find_queued_task_payload(
         self, tenant_id: str, task_id: str

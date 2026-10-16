@@ -50,6 +50,9 @@ from docling_jobkit.orchestrators.base_orchestrator import (
     TaskCancellationConflictError,
     TaskNotFoundError,
 )
+from docling_jobkit.orchestrators.completion_callbacks import (
+    emit_task_completed_callback,
+)
 from docling_jobkit.orchestrators.serialization import dump_model_with_secrets
 
 _log = logging.getLogger(__name__)
@@ -662,7 +665,13 @@ class RQOrchestrator(BaseOrchestrator):
                 await self.notifier.notify_task_subscribers(task_id)
                 await self.notifier.notify_queue_positions()
 
-            return task
+        # Best-effort completion callback fires once, for the cancellation
+        # winner only, and outside the gate so a slow sender never stalls
+        # arbitration.
+        if outcome == _CancellationOutcome.CANCELLED:
+            emit_task_completed_callback(task, "cancelled")
+
+        return task
 
     async def _cancel_task_in_redis_atomic(
         self, task_id: str

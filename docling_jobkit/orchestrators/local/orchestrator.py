@@ -36,6 +36,9 @@ from docling_jobkit.orchestrators.base_orchestrator import (
     TaskCancellationConflictError,
     TaskNotFoundError,
 )
+from docling_jobkit.orchestrators.completion_callbacks import (
+    emit_task_completed_callback,
+)
 from docling_jobkit.orchestrators.local.worker import AsyncLocalWorker
 
 _log = logging.getLogger(__name__)
@@ -137,25 +140,29 @@ class LocalOrchestrator(BaseOrchestrator):
         return True
 
     async def cancel_queued_task(self, task_id: str) -> Task:
-        task = self._cancel_pending_task(task_id)
+        task, cancelled_now = self._cancel_pending_task(task_id)
         if self.notifier:
             await self.notifier.notify_task_subscribers(task_id)
             await self.notifier.notify_queue_positions()
+        if cancelled_now:
+            emit_task_completed_callback(task, "cancelled")
         return task
 
-    def _cancel_pending_task(self, task_id: str) -> Task:
+    def _cancel_pending_task(self, task_id: str) -> tuple[Task, bool]:
         """Terminalize a queued task without ever awaiting, so it races cleanly.
 
         Mutating the status and dropping the queue entry in one await-free
         section makes cancellation mutually exclusive with
         :meth:`claim_task_started`: exactly one of the two observes PENDING.
+        Returns the task and whether this call performed the transition, so the
+        completion callback fires only for the cancellation winner.
         """
         task = self.tasks.get(task_id)
         if task is None:
             raise TaskNotFoundError(task_id)
 
         if task.task_status == TaskStatus.CANCELLED:
-            return task
+            return task, False
 
         reason = self.cancellation_conflict_reason(task.task_status)
         if reason is not None:
@@ -164,7 +171,7 @@ class LocalOrchestrator(BaseOrchestrator):
         task.set_status(TaskStatus.CANCELLED)
         if task_id in self.queue_list:
             self.queue_list.remove(task_id)
-        return task
+        return task, True
 
     async def list_tasks(
         self,

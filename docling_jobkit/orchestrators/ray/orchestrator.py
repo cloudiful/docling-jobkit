@@ -51,6 +51,9 @@ from docling_jobkit.orchestrators.base_orchestrator import (
     TaskCancellationConflictError,
     TaskNotFoundError,
 )
+from docling_jobkit.orchestrators.completion_callbacks import (
+    emit_task_completed_callback,
+)
 from docling_jobkit.orchestrators.ray.config import (
     RayOrchestratorConfig,
     parse_memory_bytes,
@@ -953,7 +956,30 @@ class RayOrchestrator(BaseOrchestrator):
                 await self.notifier.notify_task_subscribers(task_id)
                 await self.notifier.notify_queue_positions()
 
-            return task
+        # Best-effort completion callback fires once, for the cancellation
+        # winner only, outside the gate so a slow sender never stalls
+        # arbitration. The specs were captured before the transition deleted
+        # their queue payload / dispatch hash.
+        if cancellation.outcome == TaskCancellationOutcome.CANCELLED:
+            self._emit_cancelled_callback(task, cancellation.callbacks)
+
+        return task
+
+    @staticmethod
+    def _emit_cancelled_callback(
+        task: Task, callbacks: tuple[CallbackSpec, ...]
+    ) -> None:
+        """Announce a cancelled task without exposing its callback credentials.
+
+        ``task`` is the durable view returned to the caller, which deliberately
+        carries no callback specs (headers can hold credentials); the emission
+        uses a copy that the persisted specs are attached to.
+        """
+        if not callbacks:
+            return
+        emit_task_completed_callback(
+            task.model_copy(update={"callbacks": list(callbacks)}), "cancelled"
+        )
 
     async def task_result(self, task_id: str) -> Optional[DoclingTaskResult]:
         outcome = await self.task_outcome(task_id)
