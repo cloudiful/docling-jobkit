@@ -42,7 +42,7 @@ classifiers = [
 ]
 requires-python = ">=3.10"
 dependencies = [
-    "docling-slim[standard]>=2.129.0,<3.0.0",
+    "docling-slim[standard] @ git+https://github.com/cloudiful/docling.git@main",
     "pydantic~=2.10",
     "pydantic-settings~=2.4",
     "boto3~=1.35",
@@ -53,10 +53,10 @@ dependencies = [
 
 [project.optional-dependencies]
 vlm = [
-    "docling-slim[models-vlm-inline]>=2.95.0,<3.0.0",
+    "docling-slim[models-vlm-inline] @ git+https://github.com/cloudiful/docling.git@main",
 ]
 onnxruntime = [
-    "docling-slim[models-onnxruntime]>=2.94.0,<3.0.0",
+    "docling-slim[models-onnxruntime] @ git+https://github.com/cloudiful/docling.git@main",
 ]
 # asr = [
 #     "docling[asr]~=2.53",
@@ -144,7 +144,10 @@ dev = [
 ]
 
 [tool.uv.sources]
-# docling-slim = { git = "https://github.com/docling-project/docling/", branch = "main" }
+# Apply the fork's main branch to every docling-slim requirement (direct and
+# transitive) so uv resolves the same source that ships the cancellation
+# contract.
+docling-slim = { git = "https://github.com/cloudiful/docling.git", branch = "main" }
 # docling-slim = { path = "../docling", editable = true }
 
 
@@ -162,6 +165,11 @@ override-dependencies = [
 
 [tool.hatch.build.targets.sdist]
 include = ["docling_jobkit"]
+
+# docling-slim is declared as a direct git requirement so pip resolves it from
+# the fork; hatchling rejects direct references unless this is enabled.
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [project.scripts]
 docling-jobkit-local = "docling_jobkit.cli.local:app"

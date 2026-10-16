@@ -1638,9 +1638,9 @@ requires-dist = [
     { name = "boxsdk", extras = ["jwt"], marker = "extra == 'box'", specifier = ">=10" },
     { name = "codeflare-sdk", marker = "python_full_version >= '3.11' and extra == 'ray'", specifier = ">=0.37.0" },
     { name = "confluent-kafka", marker = "extra == 'kafka'", specifier = ">=2.5.0,<3" },
-    { name = "docling-slim", extras = ["models-onnxruntime"], marker = "extra == 'onnxruntime'", specifier = ">=2.94.0,<3.0.0" },
-    { name = "docling-slim", extras = ["models-vlm-inline"], marker = "extra == 'vlm'", specifier = ">=2.95.0,<3.0.0" },
-    { name = "docling-slim", extras = ["standard"], specifier = ">=2.129.0,<3.0.0" },
+    { name = "docling-slim", extras = ["models-onnxruntime"], marker = "extra == 'onnxruntime'", git = "https://github.com/cloudiful/docling.git?branch=main" },
+    { name = "docling-slim", extras = ["models-vlm-inline"], marker = "extra == 'vlm'", git = "https://github.com/cloudiful/docling.git?branch=main" },
+    { name = "docling-slim", extras = ["standard"], git = "https://github.com/cloudiful/docling.git?branch=main" },
     { name = "google-api-python-client", marker = "extra == 'gdrive'", specifier = ">=2.183.0" },
     { name = "google-auth-oauthlib", marker = "extra == 'gdrive'", specifier = ">=1.2.2" },
     { name = "google-cloud-storage", marker = "extra == 'gcloudstorage'", specifier = ">=2.10.0" },
@@ -1686,7 +1686,7 @@ dev = [
 ]
 pr-fast-checks = [
     { name = "boto3-stubs", extras = ["s3"], specifier = "~=1.35" },
-    { name = "docling-slim", specifier = ">=2.129.0,<3.0.0" },
+    { name = "docling-slim", git = "https://github.com/cloudiful/docling.git?branch=main" },
     { name = "httpx", specifier = ">=0.28,<1" },
     { name = "pandas-stubs", specifier = "~=2.2" },
     { name = "pydantic", specifier = "~=2.10" },
@@ -1748,8 +1748,8 @@ wheels = [
 
 [[package]]
 name = "docling-slim"
-version = "2.138.0"
-source = { registry = "https://pypi.org/simple" }
+version = "2.140.0"
+source = { git = "https://github.com/cloudiful/docling.git?branch=main#f55622c249f74b6933f490f7819c494ee114e47f" }
 dependencies = [
     { name = "certifi" },
     { name = "docling-core" },
@@ -1760,10 +1760,6 @@ dependencies = [
     { name = "pydantic-settings" },
     { name = "requests" },
     { name = "tqdm" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/99/8d/f1bc0fd27c2d19fa4cba07fcaa9ce67094d51275f84153e6471a91cbc28b/docling_slim-2.138.0.tar.gz", hash = "sha256:1294949bd3ab1c9ef41eebf5c39549e2a845bef360a6dcf7001676644d24bcc6", size = 815599, upload-time = "2026-10-12T06:16:20.226Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/fe/47/237cbeaa6724ac2275a7f5fbd0ed5484e8cda20a5521de9ffea0463e9386/docling_slim-2.138.0-py3-none-any.whl", hash = "sha256:35f709532563f43b004faab02e974ae95c4fc05455cee2e038af9e0abeaaff6e", size = 995749, upload-time = "2026-10-12T06:16:17.925Z" },
 ]
 
 [package.optional-dependencies]
