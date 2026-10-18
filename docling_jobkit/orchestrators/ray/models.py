@@ -248,11 +248,9 @@ class TaskCancellationOutcome(str, Enum):
 class TaskCancellationResult:
     """Outcome of one queued-only cancellation attempt.
 
-    ``status`` is the durable status that made the cancellation impossible for
-    a conflict; it is also set for an idempotent repeat so callers can report it.
-    ``callbacks`` carries the winner's callback specs, captured before the
-    atomic transition deletes their queue payload / dispatch hash, so the
-    orchestrator can announce the cancellation once outside the lock.
+    ``status`` is the observed durable status of a conflict or repeat.
+    ``callbacks`` carries the winner's specs, captured before the transition
+    removes their queue payload / dispatch hash.
     """
 
     outcome: TaskCancellationOutcome

@@ -661,15 +661,14 @@ class RQOrchestrator(BaseOrchestrator):
                 # in-memory copy that the atomic transition just superseded.
                 self.tasks[task_id] = task
 
-            if self.notifier:
-                await self.notifier.notify_task_subscribers(task_id)
-                await self.notifier.notify_queue_positions()
-
-        # Best-effort completion callback fires once, for the cancellation
-        # winner only, and outside the gate so a slow sender never stalls
-        # arbitration.
+        # Schedule the callback before the fallible notifications, outside the
+        # gate so a slow sender cannot stall arbitration.
         if outcome == _CancellationOutcome.CANCELLED:
             emit_task_completed_callback(task, "cancelled")
+
+        if self.notifier:
+            await self.notifier.notify_task_subscribers(task_id)
+            await self.notifier.notify_queue_positions()
 
         return task
 

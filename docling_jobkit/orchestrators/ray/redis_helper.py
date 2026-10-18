@@ -61,9 +61,8 @@ _TERMINAL_STATUSES = frozenset(
 def _decode_queued_payload_callbacks(payload: str) -> list[CallbackSpec]:
     """Read callback specs from a tenant queue payload.
 
-    Returns an empty list for a payload without callbacks or with an
-    unparseable shape: a client notification is best-effort and must never
-    block cancellation.
+    A missing or unparseable payload yields none: notification is best-effort
+    and must never block cancellation.
     """
     try:
         raw = json.loads(payload).get("callbacks") or []
@@ -1555,14 +1554,10 @@ class RedisStateManager:
     async def _capture_queued_cancellation_callbacks(
         self, *, task_id: str, queued_payload: Optional[str]
     ) -> list[CallbackSpec]:
-        """Capture a queued task's callback specs before cancellation deletes them.
+        """Capture the task's specs from the queue payload or the dispatch hash.
 
-        A task that has not been dispatched keeps its specs in the tenant queue
-        payload; once dispatched they survive only in the TTL-bounded dispatch
-        hash, which the cancellation transaction deletes. Both are read while
-        the caller still holds the pending-only WATCH, so the captured specs
-        belong to the exact task the winning transaction cancels. A missing or
-        unreadable source yields no callbacks instead of blocking cancellation.
+        Both sources are read under the caller's pending-only WATCH, so the
+        capture belongs to the task this cancellation removes.
         """
         if queued_payload is not None:
             return _decode_queued_payload_callbacks(queued_payload)

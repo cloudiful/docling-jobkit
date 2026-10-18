@@ -141,21 +141,18 @@ class LocalOrchestrator(BaseOrchestrator):
 
     async def cancel_queued_task(self, task_id: str) -> Task:
         task, cancelled_now = self._cancel_pending_task(task_id)
+        if cancelled_now:
+            emit_task_completed_callback(task, "cancelled")
         if self.notifier:
             await self.notifier.notify_task_subscribers(task_id)
             await self.notifier.notify_queue_positions()
-        if cancelled_now:
-            emit_task_completed_callback(task, "cancelled")
         return task
 
     def _cancel_pending_task(self, task_id: str) -> tuple[Task, bool]:
-        """Terminalize a queued task without ever awaiting, so it races cleanly.
+        """Cancel a queued task in one await-free step.
 
-        Mutating the status and dropping the queue entry in one await-free
-        section makes cancellation mutually exclusive with
-        :meth:`claim_task_started`: exactly one of the two observes PENDING.
-        Returns the task and whether this call performed the transition, so the
-        completion callback fires only for the cancellation winner.
+        The status write and queue-entry removal must stay indivisible so a
+        concurrent pending-claim cannot interleave.
         """
         task = self.tasks.get(task_id)
         if task is None:

@@ -952,16 +952,14 @@ class RayOrchestrator(BaseOrchestrator):
             if task is None:
                 raise TaskNotFoundError(task_id)
 
-            if self.notifier:
-                await self.notifier.notify_task_subscribers(task_id)
-                await self.notifier.notify_queue_positions()
-
-        # Best-effort completion callback fires once, for the cancellation
-        # winner only, outside the gate so a slow sender never stalls
-        # arbitration. The specs were captured before the transition deleted
-        # their queue payload / dispatch hash.
+        # Schedule the callback before the fallible notifications, outside the
+        # gate so a slow sender cannot stall arbitration.
         if cancellation.outcome == TaskCancellationOutcome.CANCELLED:
             self._emit_cancelled_callback(task, cancellation.callbacks)
+
+        if self.notifier:
+            await self.notifier.notify_task_subscribers(task_id)
+            await self.notifier.notify_queue_positions()
 
         return task
 
@@ -969,12 +967,7 @@ class RayOrchestrator(BaseOrchestrator):
     def _emit_cancelled_callback(
         task: Task, callbacks: tuple[CallbackSpec, ...]
     ) -> None:
-        """Announce a cancelled task without exposing its callback credentials.
-
-        ``task`` is the durable view returned to the caller, which deliberately
-        carries no callback specs (headers can hold credentials); the emission
-        uses a copy that the persisted specs are attached to.
-        """
+        """Emit the callback without exposing credential-bearing specs."""
         if not callbacks:
             return
         emit_task_completed_callback(

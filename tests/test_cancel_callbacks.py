@@ -2,15 +2,8 @@
 
 """Winner-only completion callbacks for queued cancellation.
 
-A cancelled queued task emits exactly one terminal ``task_completed`` callback
-with ``task_status == "cancelled"`` per engine, from the arbitration winner and
-after the lock is released. A repeated cancel, a lost claim, and an already
-finished task emit nothing, and a failing sender never changes the terminal
-cancellation outcome. Every conversion here is a deterministic fake and the
-callback sender is replaced by a recorder, so no model is downloaded and no HTTP
-request leaves the process. RQ and Ray arbitrate through Redis, so those tests
-require a real server (DOCLING_TEST_REDIS_URL, default DB15) and fail loudly
-instead of skipping.
+RQ and Ray arbitrate through Redis, so those tests require a real server
+(``DOCLING_TEST_REDIS_URL``, default DB15) and fail loudly instead of skipping.
 """
 
 import asyncio
@@ -56,8 +49,6 @@ def _callback_spec() -> CallbackSpec:
 
 
 class _RecordingInvoker:
-    """Captures invoke_callbacks_async calls instead of firing HTTP requests."""
-
     calls: list[dict[str, Any]] = []
 
     def invoke_callbacks_async(self, **kwargs: Any) -> None:
@@ -65,10 +56,24 @@ class _RecordingInvoker:
 
 
 class _ExplodingInvoker:
-    """Fails the sender, exercising the best-effort emission boundary."""
-
     def invoke_callbacks_async(self, **kwargs: Any) -> None:
         raise RuntimeError("callback sender is down")
+
+
+class _FailingNotifier:
+    async def add_task(self, task_id: str) -> None:
+        pass
+
+    async def remove_task(self, task_id: str) -> None:
+        pass
+
+    async def notify_task_subscribers(self, task_id: str) -> None:
+        raise RuntimeError("notifier is down")
+
+    async def notify_queue_positions(self) -> None:
+        raise AssertionError(
+            "queue notification must not follow a failed subscriber notification"
+        )
 
 
 @pytest.fixture
@@ -139,7 +144,6 @@ def _assert_cancelled_callback(calls: list[dict[str, Any]], task_id: str) -> Non
     assert progress.kind == ProgressKind.TASK_COMPLETED
     assert progress.task_status == "cancelled"
     assert progress.failure is None
-    # The emitted payload must survive a wire round-trip as the cancelled status.
     request = ProgressCallbackRequest(task_id=task_id, progress=progress)
     body = json.loads(request.model_dump_json())
     assert body == {
@@ -274,6 +278,24 @@ class TestLocalCancelCallbacks:
         assert cancelled.task_status is TaskStatus.CANCELLED
         assert cancelled.is_completed()
 
+    @pytest.mark.asyncio
+    async def test_notifier_failure_keeps_callback_and_durable_cancel(
+        self, recorded_callbacks: list[dict[str, Any]]
+    ):
+        orch = _local_orchestrator()
+        task = await _enqueue_local(orch, [_callback_spec()])
+        orch.notifier = _FailingNotifier()
+
+        with pytest.raises(RuntimeError, match="notifier is down"):
+            await orch.cancel_queued_task(task.task_id)
+
+        assert orch.tasks[task.task_id].task_status is TaskStatus.CANCELLED
+        _assert_cancelled_callback(recorded_callbacks, task.task_id)
+
+        orch.notifier = None
+        await orch.cancel_queued_task(task.task_id)
+        _assert_cancelled_callback(recorded_callbacks, task.task_id)
+
 
 @pytest.fixture
 def rq_token() -> str:
@@ -403,6 +425,43 @@ class TestRqCancelCallbacks:
         durable = await orch._get_task_from_redis(task.task_id)
         assert durable is not None
         assert durable.task_status is TaskStatus.CANCELLED
+
+    @pytest.mark.asyncio
+    async def test_notifier_failure_keeps_callback_and_durable_cancel(
+        self,
+        rq_orchestrator,
+        recorded_callbacks: list[dict[str, Any]],
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        orch, created = rq_orchestrator
+        task = await _enqueue_rq(orch, created, [_callback_spec()])
+
+        gate_released: list[bool] = []
+        real_emit = emit_task_completed_callback
+
+        def emit_and_record(task_obj: Task, status: str) -> None:
+            gate_released.append(not orch._redis_gate._semaphore.locked())
+            real_emit(task_obj, status)
+
+        monkeypatch.setattr(
+            "docling_jobkit.orchestrators.rq.orchestrator.emit_task_completed_callback",
+            emit_and_record,
+        )
+        orch.notifier = _FailingNotifier()
+
+        with pytest.raises(RuntimeError, match="notifier is down"):
+            await orch.cancel_queued_task(task.task_id)
+
+        durable = await orch._get_task_from_redis(task.task_id)
+        assert durable is not None
+        assert durable.task_status is TaskStatus.CANCELLED
+        _assert_cancelled_callback(recorded_callbacks, task.task_id)
+        assert gate_released == [True]
+
+        orch.notifier = None
+        await orch.cancel_queued_task(task.task_id)
+        _assert_cancelled_callback(recorded_callbacks, task.task_id)
+        assert gate_released == [True]
 
 
 @pytest.fixture
@@ -544,3 +603,42 @@ class TestRayCancelCallbacks:
         metadata = await orch.redis_manager.get_task_metadata_model(task.task_id)
         assert metadata is not None
         assert metadata.status is TaskStatus.CANCELLED
+
+    @pytest.mark.asyncio
+    async def test_notifier_failure_keeps_callback_and_durable_cancel(
+        self,
+        ray_orchestrator,
+        ray_token: str,
+        recorded_callbacks: list[dict[str, Any]],
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        orch, created = ray_orchestrator
+        tenant_id = f"cancelcb-{ray_token}"
+        task = await _enqueue_ray(orch, created, tenant_id, [_callback_spec()])
+
+        gate_released: list[bool] = []
+        real_emit = emit_task_completed_callback
+
+        def emit_and_record(task_obj: Task, status: str) -> None:
+            gate_released.append(not orch._redis_gate._semaphore.locked())
+            real_emit(task_obj, status)
+
+        monkeypatch.setattr(
+            "docling_jobkit.orchestrators.ray.orchestrator.emit_task_completed_callback",
+            emit_and_record,
+        )
+        orch.notifier = _FailingNotifier()
+
+        with pytest.raises(RuntimeError, match="notifier is down"):
+            await orch.cancel_queued_task(task.task_id)
+
+        metadata = await orch.redis_manager.get_task_metadata_model(task.task_id)
+        assert metadata is not None
+        assert metadata.status is TaskStatus.CANCELLED
+        _assert_cancelled_callback(recorded_callbacks, task.task_id)
+        assert gate_released == [True]
+
+        orch.notifier = None
+        await orch.cancel_queued_task(task.task_id)
+        _assert_cancelled_callback(recorded_callbacks, task.task_id)
+        assert gate_released == [True]
