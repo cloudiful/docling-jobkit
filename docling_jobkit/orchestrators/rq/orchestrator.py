@@ -199,6 +199,7 @@ def _decode_stored_task(data: dict[str, Any], *, allow_external_plugins: bool) -
         "chunking_export_options",
         "callbacks",
         "metadata",
+        "target_document_version",
     ):
         if data.get(field_name) is not None:
             task_kwargs[field_name] = data[field_name]
@@ -282,6 +283,7 @@ class RQOrchestrator(BaseOrchestrator):
         callbacks: list[CallbackSpec] | None = None,
         metadata: dict[str, Any] | None = None,
         targets: list[TaskTarget] | None = None,
+        target_document_version: str | None = None,
     ) -> Task:
         resolved_targets = self._resolve_enqueue_targets(target, targets)
         self._validate_targets(resolved_targets)
@@ -321,6 +323,7 @@ class RQOrchestrator(BaseOrchestrator):
                     "targets": resolved_targets,
                     "callbacks": callbacks or [],
                     "metadata": metadata or {},
+                    "target_document_version": target_document_version,
                 },
                 allow_external_plugins=self.config.allow_external_plugins,
             )
@@ -852,6 +855,7 @@ class RQOrchestrator(BaseOrchestrator):
                     "num_failed": 0,
                 },
                 metadata=job_task_data.get("metadata") or {},
+                target_document_version=job_task_data.get("target_document_version"),
             )
 
             self.tasks[task_id] = temp_task

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "docling-jobkit"
-version = "3.8.2"  # DO NOT EDIT, updated automatically
+version = "3.9.0"  # DO NOT EDIT, updated automatically
 description = "Running a distributed job processing documents with Docling."
 readme = "README.md"
 license = "MIT"
@@ -43,6 +43,7 @@ classifiers = [
 requires-python = ">=3.10"
 dependencies = [
     "docling-slim[standard] @ git+https://github.com/cloudiful/docling.git@main",
+    "docling-core>=2.92.0,<3.0.0",
     "pydantic~=2.10",
     "pydantic-settings~=2.4",
     "boto3~=1.35",
