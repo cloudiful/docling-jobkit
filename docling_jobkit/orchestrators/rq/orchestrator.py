@@ -71,6 +71,7 @@ class RQOrchestratorConfig(BaseModel):
     redis_max_connections: int = 50
     redis_socket_timeout: Optional[float] = None
     redis_socket_connect_timeout: Optional[float] = None
+    redis_health_check_interval: float = 30.0
     redis_gate_concurrency: Optional[int] = None
     redis_gate_reserved_connections: int = 10
     redis_gate_wait_timeout: float = 0.25
@@ -214,6 +215,10 @@ def _decode_stored_task(data: dict[str, Any], *, allow_external_plugins: bool) -
     )
 
 
+def _encode_document_stream(source: "DocumentStream") -> str:
+    return base64.b64encode(source.stream.read()).decode()
+
+
 class RQOrchestrator(BaseOrchestrator):
     @staticmethod
     def make_rq_queue(config: RQOrchestratorConfig) -> tuple[redis.Redis, Queue]:
@@ -223,6 +228,7 @@ class RQOrchestrator(BaseOrchestrator):
             max_connections=config.redis_max_connections,
             socket_timeout=config.redis_socket_timeout,
             socket_connect_timeout=config.redis_socket_connect_timeout,
+            health_check_interval=config.redis_health_check_interval,
         )
         conn = redis.Redis(connection_pool=pool)
         rq_queue = Queue(
@@ -256,6 +262,7 @@ class RQOrchestrator(BaseOrchestrator):
             max_connections=config.redis_max_connections,
             socket_timeout=config.redis_socket_timeout,
             socket_connect_timeout=config.redis_socket_connect_timeout,
+            health_check_interval=config.redis_health_check_interval,
         )
         self._async_redis_conn = async_redis.Redis(
             connection_pool=self._async_redis_pool
@@ -303,7 +310,9 @@ class RQOrchestrator(BaseOrchestrator):
             rq_sources: list[TaskSource] = []
             for source in sources:
                 if isinstance(source, DocumentStream):
-                    encoded_doc = base64.b64encode(source.stream.read()).decode()
+                    encoded_doc = await asyncio.to_thread(
+                        _encode_document_stream, source
+                    )
                     rq_sources.append(
                         FileSourceRequest(
                             filename=source.name, base64_string=encoded_doc
@@ -334,7 +343,8 @@ class RQOrchestrator(BaseOrchestrator):
             await self.init_task_tracking(task)
             await self._store_task_in_redis(task)
             try:
-                self._rq_queue.enqueue(
+                await asyncio.to_thread(
+                    self._rq_queue.enqueue,
                     self._rq_job_function,
                     kwargs={"task_data": task_data},
                     job_id=task_id,

@@ -1549,7 +1549,7 @@ wheels = [
 
 [[package]]
 name = "docling-jobkit"
-version = "3.9.0"
+version = "3.9.1"
 source = { editable = "." }
 dependencies = [
     { name = "boto3" },
@@ -1775,8 +1775,8 @@ wheels = [
 
 [[package]]
 name = "docling-slim"
-version = "2.141.0"
-source = { git = "https://github.com/cloudiful/docling.git?branch=main#061f35167867e7bc5e22763e264f838875d1a41a" }
+version = "2.143.1"
+source = { git = "https://github.com/cloudiful/docling.git?branch=main#589138cbe07028693d4a09347a60d3c8e298cf14" }
 dependencies = [
     { name = "certifi" },
     { name = "docling-core" },
