@@ -1775,8 +1775,8 @@ wheels = [
 
 [[package]]
 name = "docling-slim"
-version = "2.143.1"
-source = { git = "https://github.com/cloudiful/docling.git?branch=main#589138cbe07028693d4a09347a60d3c8e298cf14" }
+version = "2.145.0"
+source = { git = "https://github.com/cloudiful/docling.git?branch=main#a6bcc4fecedf22f8ca9899ed5e4096f080ed3204" }
 dependencies = [
     { name = "certifi" },
     { name = "docling-core" },

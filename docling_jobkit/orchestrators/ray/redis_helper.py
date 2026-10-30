@@ -81,17 +81,8 @@ end
 return 0
 """
 
-# Reserve one in-flight converter unit for a task, bounded by the tenant ceiling
-# ARGV[1] (max_concurrent_tasks). Units are tracked on both the tenant limits
-# hash (KEYS[1]) and the task execution hash (KEYS[2]) so that
-# terminalization/reconcile can release a parent's units crash-safely.
-# Returns 1 if granted, 0 if the tenant is at its ceiling, or -1 if the task no
-# longer has an execution lease (terminalized/reconciled) or its durable status
-# is not STARTED (unclaimed PENDING/CANCELLED/terminal). The STARTED check keeps
-# converter dispatch fail-closed when the claim never committed, without granting
-# (and leaking) a permit. KEYS[2] is task:{id}:execution; the durable status is
-# read from the sibling task:{id} hash derived from it so the 2-key call
-# signature is unchanged.
+# Track units on both tenant and execution hashes for crash-safe release.
+# Require a durable STARTED claim and execution lease before granting a unit.
 _ACQUIRE_CONVERTER_UNIT_LUA = """
 if redis.call('EXISTS', KEYS[2]) == 0 then
     return -1
@@ -126,15 +117,7 @@ redis.call('HINCRBY', KEYS[2], 'converter_units', -rel)
 return rel
 """
 
-# Atomically mark a task STARTED and bump the per-tenant started counter, but
-# only on a genuine transition INTO started (i.e. not when the task is already
-# started or already terminal). This guarantees tasks_started_total increments
-# exactly once per task even if process_task is retried, and never counts a task
-# that reconciliation already terminalized.
-# A CANCELLED task counts as terminal here: a cancellation that won must never
-# be overwritten by a worker that is only now claiming the task.
-# KEYS[1] = task:{id}, KEYS[2] = tenant:{id}:task_counters
-# ARGV[1] = "started", ARGV[2] = ISO timestamp
+# Atomically count the STARTED transition once and preserve terminal states.
 _MARK_TASK_STARTED_LUA = """
 local cur = redis.call('HGET', KEYS[1], 'status')
 if cur ~= 'started' and cur ~= 'success' and cur ~= 'failure' and cur ~= 'cancelled' then
@@ -145,17 +128,8 @@ end
 return 0
 """
 
-# Write the replica-owned execution lease only for a committed STARTED claim.
-# The lease is the only thing that lets a replica acquire a converter unit, so
-# only a task whose durable status is STARTED may get one: returning 0 for
-# PENDING/CANCELLED/terminal/missing makes the replica's subsequent
-# acquire_converter_unit() report "no execution lease" and abort before
-# conversion. This keeps the coordinator fail-closed when mark_task_started
-# hit a transient error (no durable claim) even though it swallows the error
-# and continues: no lease, no converter unit, no conversion, so a later
-# queued cancellation can never succeed after work already began.
-# KEYS[1] = task:{id} (status), KEYS[2] = task:{id}:execution (lease)
-# ARGV[1..4] = replica_id, tenant_id, claimed_at, heartbeat_at
+# Grant leases only for durable STARTED claims so failed claims cannot
+# authorize converter dispatch.
 _WRITE_TASK_EXECUTION_LEASE_LUA = """
 if redis.call('HGET', KEYS[1], 'status') ~= 'started' then
     return 0
@@ -646,16 +620,9 @@ class RedisStateManager:
     ) -> None:
         """Update task status and metadata.
 
-        A committed STARTED claim and any terminal status (SUCCESS/FAILURE/
-        CANCELLED) are never regressed: when the durable status is already
-        STARTED and the incoming status is PENDING or CANCELLED, or when the
-        durable status is already terminal and differs from the incoming
-        status, the write is skipped so a late/stale writer cannot reopen a won
-        claim (re-enabling queued cancellation of running work) nor resurrect a
-        cancelled task. Same-status rewrites stay allowed for idempotent
-        refresh while preserving the committed started_at (claim identity) and
-        finished_at; forward moves (PENDING->STARTED, STARTED->SUCCESS/FAILURE,
-        PENDING->CANCELLED) and safe progress/error fields ride along.
+        Reject STARTED regressions and changes to terminal states. Allow
+        same-status refreshes and forward transitions while preserving
+        committed start and finish timestamps.
 
         Args:
             task_id: Task identifier
