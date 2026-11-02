@@ -494,6 +494,63 @@ async def test_wrongtype_index_cleanup_keeps_the_cancellation_winner(harness):
     assert page.items == []
 
 
+async def test_disabled_cancellation_removes_a_ready_index_entry(harness):
+    task = await harness.publish(created_at=_at(10), callbacks=(_callback_spec(),))
+    orchestrator = harness.orchestrator()
+    await orchestrator.list_tasks(tenant_id=harness.tenant)
+    index_key = tenant_index_key(harness.manager._index_namespace, harness.tenant)
+    assert task.task_id.encode() in set(await harness.redis.zrange(index_key, 0, -1))
+    assert await harness.manager.is_task_index_ready(harness.tenant)
+
+    disabled = RedisStateManager(redis_url=REDIS_URL, enable_task_listing=False)
+    await disabled.connect()
+    try:
+        result = await disabled.cancel_queued_task_atomic(task.task_id)
+    finally:
+        await disabled.disconnect()
+
+    assert result.outcome is TaskCancellationOutcome.CANCELLED
+    assert len(result.callbacks) == 1
+    assert await harness.redis.zrange(index_key, 0, -1) == []
+    metadata = await harness.manager.get_task_metadata_model(task.task_id)
+    assert metadata is not None
+    assert metadata.status is TaskStatus.CANCELLED
+    page = await orchestrator.list_tasks(tenant_id=harness.tenant)
+    assert page.items == []
+
+
+async def test_disabled_wrongtype_index_cleanup_keeps_the_cancellation_winner(
+    harness,
+):
+    task = await harness.publish(created_at=_at(10), callbacks=(_callback_spec(),))
+    orchestrator = harness.orchestrator()
+    await orchestrator.list_tasks(tenant_id=harness.tenant)
+    index_key = tenant_index_key(harness.manager._index_namespace, harness.tenant)
+    assert await harness.manager.is_task_index_ready(harness.tenant)
+
+    await harness.redis.set(index_key, "not-a-zset")
+    disabled = RedisStateManager(redis_url=REDIS_URL, enable_task_listing=False)
+    await disabled.connect()
+    try:
+        result = await disabled.cancel_queued_task_atomic(task.task_id)
+        assert result.outcome is TaskCancellationOutcome.CANCELLED
+        assert len(result.callbacks) == 1
+        metadata = await harness.manager.get_task_metadata_model(task.task_id)
+        assert metadata is not None
+        assert metadata.status is TaskStatus.CANCELLED
+        assert not await disabled.is_task_index_ready(harness.tenant)
+
+        retried = await disabled.cancel_queued_task_atomic(task.task_id)
+        assert retried.outcome is TaskCancellationOutcome.ALREADY_CANCELLED
+        assert retried.callbacks == ()
+    finally:
+        await disabled.disconnect()
+
+    await harness.redis.delete(index_key)
+    page = await orchestrator.list_tasks(tenant_id=harness.tenant)
+    assert page.items == []
+
+
 async def test_wrongtype_lifecycle_error_propagates_and_is_not_success(harness):
     task = await harness.publish(created_at=_at(10))
     orchestrator = harness.orchestrator()

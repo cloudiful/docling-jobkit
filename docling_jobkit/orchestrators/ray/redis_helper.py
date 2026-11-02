@@ -1002,6 +1002,21 @@ class RedisStateManager:
                 exc,
             )
 
+    async def _invalidate_existing_task_index(self, tenant_id: str) -> None:
+        """Invalidate readiness only when this tenant ever had index state."""
+        try:
+            await queue_invalidate_ready_if_present(
+                self._ensure_redis(),
+                self._task_index_generation_key(tenant_id),
+                self._task_index_ready_key(tenant_id),
+            )
+        except Exception as exc:
+            _log.warning(
+                "Invalidating the existing task listing index for %s failed: %s",
+                tenant_id,
+                exc,
+            )
+
     async def read_task_listing_page(
         self, tenant_id: str, *, limit: int, offset: int
     ) -> list[ActiveTaskItem]:
@@ -2050,15 +2065,16 @@ class RedisStateManager:
                         "tasks_cancelled_total",
                         1,
                     )
-                    if self.enable_task_listing:
-                        # The cancellation and the listing removal commit
-                        # together, so a cancelled task never stays listed.
-                        _queue(
-                            "index",
-                            pipe.zrem,
-                            self._task_index_key(resolve_tenant_id(tenant_id)),
-                            task_id,
-                        )
+                    # The cancellation and the listing removal commit
+                    # together. It runs even when publication is currently
+                    # disabled, so a task indexed before the flag was turned
+                    # off cannot survive its cancellation.
+                    _queue(
+                        "index",
+                        pipe.zrem,
+                        self._task_index_key(resolve_tenant_id(tenant_id)),
+                        task_id,
+                    )
                     results = await pipe.execute(raise_on_error=False)
                     index_position = (
                         queued.index("index") if "index" in queued else None
@@ -2072,10 +2088,9 @@ class RedisStateManager:
                         if isinstance(result, Exception) and position != index_position
                     ]
                     if non_index_errors:
-                        if self.enable_task_listing:
-                            await self.invalidate_task_index(
-                                resolve_tenant_id(tenant_id)
-                            )
+                        await self._invalidate_existing_task_index(
+                            resolve_tenant_id(tenant_id)
+                        )
                         raise non_index_errors[0]
                     if (
                         index_position is not None
@@ -2087,7 +2102,9 @@ class RedisStateManager:
                             f"but derived index cleanup failed: "
                             f"{results[index_position]}"
                         )
-                        await self.invalidate_task_index(resolve_tenant_id(tenant_id))
+                        await self._invalidate_existing_task_index(
+                            resolve_tenant_id(tenant_id)
+                        )
 
                     _log.info(
                         "Cancelled queued task %s for tenant %s "
