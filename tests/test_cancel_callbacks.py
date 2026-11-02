@@ -100,31 +100,64 @@ def sync_conn():
     conn.close()
 
 
-def _purge_redis(conn, token: str, task_ids: list[str]) -> None:
-    """Remove every key a cancellation-callback test created."""
-    keys: set[bytes] = set()
-    for pattern in (
-        f"*cancelcb:{token}*",
-        f"rq:*cancelcb-{token}*",
-        f"tenant:*cancelcb-{token}*",
-    ):
-        keys |= set(conn.scan_iter(match=pattern))
-    for task_id in task_ids:
-        for suffix in ("", ":dispatch", ":execution"):
-            keys.add(f"task:{task_id}{suffix}".encode())
-        keys.add(f"docling:tasks:{task_id}:metadata".encode())
-        # The RQ orchestrator uses the task id as the job id, and a cancelled
-        # job's hash is not always TTL'd, so remove it explicitly.
-        keys.add(f"rq:job:{task_id}".encode())
-    if keys:
-        conn.delete(*keys)
+class _RedisBaseline:
+    """Captures the pre-test exact keyspace so cleanup removes only new keys."""
 
-    # RQ keeps a global registry of queue names; drop this test's entry and the
-    # registry itself once it is the last one left.
-    queues_key = b"rq:queues"
-    conn.srem(queues_key, f"rq:queue:cancelcb-{token}")
-    if conn.scard(queues_key) == 0:
-        conn.delete(queues_key)
+    def __init__(self, conn) -> None:
+        self._conn = conn
+        self._keys = set(conn.keys())
+        self._tenants = set(conn.smembers("tenants:known"))
+        self._queues = set(conn.smembers("rq:queues"))
+        self._had_tenants = bool(conn.exists("tenants:known"))
+        self._had_queues = bool(conn.exists("rq:queues"))
+
+    def purge(
+        self,
+        token: str,
+        task_ids: list[str],
+        *,
+        owned_tenants: tuple[str, ...] = (),
+        owned_queues: tuple[str, ...] = (),
+    ) -> None:
+        """Delete only keys proven to belong to this fixture run."""
+        token_bytes = token.encode("utf-8")
+        new_keys = set(self._conn.keys()) - self._keys
+        owned_keys = {key for key in new_keys if token_bytes in key}
+        for task_id in task_ids:
+            for suffix in ("", ":dispatch", ":execution"):
+                key = f"task:{task_id}{suffix}".encode()
+                if key not in self._keys:
+                    owned_keys.add(key)
+            for key in (
+                f"docling:tasks:{task_id}:metadata".encode(),
+                f"rq:job:{task_id}".encode(),
+            ):
+                if key not in self._keys:
+                    owned_keys.add(key)
+        if owned_keys:
+            self._conn.delete(*owned_keys)
+
+        current_tenants = set(self._conn.smembers("tenants:known"))
+        added_tenants = current_tenants - self._tenants
+        owned_tenants_bytes = {
+            tenant.encode("utf-8")
+            for tenant in owned_tenants
+            if tenant.encode("utf-8") in added_tenants
+        }
+        if owned_tenants_bytes:
+            self._conn.srem("tenants:known", *owned_tenants_bytes)
+        if not self._had_tenants and self._conn.scard("tenants:known") == 0:
+            self._conn.delete("tenants:known")
+
+        owned_queues_bytes = {
+            queue.encode("utf-8")
+            for queue in owned_queues
+            if queue.encode("utf-8") not in self._queues
+        }
+        if owned_queues_bytes:
+            self._conn.srem("rq:queues", *owned_queues_bytes)
+        if not self._had_queues and self._conn.scard("rq:queues") == 0:
+            self._conn.delete("rq:queues")
 
 
 async def _wait_until(predicate, timeout: float = 10.0, message: str = "timeout"):
@@ -331,10 +364,15 @@ async def rq_orchestrator(rq_token: str, sync_conn):
         results_ttl=600,
     )
     orch = RQOrchestrator(config=config)
+    baseline = _RedisBaseline(sync_conn)
     created: list[str] = []
     yield orch, created
     await orch.close()
-    _purge_redis(sync_conn, rq_token, created)
+    baseline.purge(
+        rq_token,
+        created,
+        owned_queues=(f"rq:queue:cancelcb-{rq_token}",),
+    )
 
 
 async def _enqueue_rq(orch, created: list[str], callbacks: list[CallbackSpec]) -> Task:
@@ -507,10 +545,15 @@ async def ray_orchestrator(ray_token: str, sync_conn):
     orch.redis_manager = state_manager
     orch._redis_gate = RedisCallerGate(config.redis_gate_concurrency or 1)
     orch.dispatcher = None
+    baseline = _RedisBaseline(sync_conn)
     created: list[str] = []
     yield orch, created
     await state_manager.disconnect()
-    _purge_redis(sync_conn, ray_token, created)
+    baseline.purge(
+        ray_token,
+        created,
+        owned_tenants=(f"cancelcb-{ray_token}",),
+    )
 
 
 async def _enqueue_ray(
