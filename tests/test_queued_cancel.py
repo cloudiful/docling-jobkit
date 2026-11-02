@@ -82,32 +82,64 @@ def sync_conn():
     conn.close()
 
 
-def _purge_redis(conn, token: str, task_ids: list[str]) -> None:
-    """Remove every key a cancellation test created, keeping Redis clean."""
-    keys: set[bytes] = set()
-    for pattern in (
-        f"*cancel72:{token}*",
-        f"rq:*cancel72-{token}*",
-        f"tenant:*cancel72-{token}*",
-    ):
-        keys |= set(conn.scan_iter(match=pattern))
-    for task_id in task_ids:
-        keys.add(f"task:{task_id}".encode())
-        keys.add(f"task:{task_id}:dispatch".encode())
-        keys.add(f"task:{task_id}:execution".encode())
-        keys.add(f"docling:tasks:{task_id}:metadata".encode())
-        # The RQ orchestrator uses the task id as the job id, and a cancelled
-        # job's hash is not always TTL'd, so remove it explicitly.
-        keys.add(f"rq:job:{task_id}".encode())
-    if keys:
-        conn.delete(*keys)
+class _RedisBaseline:
+    """Captures the pre-test exact keyspace so cleanup removes only new keys."""
 
-    # RQ keeps a global registry of queue names; drop this test's entry and the
-    # registry itself once it is the last one left.
-    queues_key = b"rq:queues"
-    conn.srem(queues_key, f"rq:queue:cancel72-{token}")
-    if conn.scard(queues_key) == 0:
-        conn.delete(queues_key)
+    def __init__(self, conn) -> None:
+        self._conn = conn
+        self._keys = set(conn.keys())
+        self._tenants = set(conn.smembers("tenants:known"))
+        self._queues = set(conn.smembers("rq:queues"))
+        self._had_tenants = bool(conn.exists("tenants:known"))
+        self._had_queues = bool(conn.exists("rq:queues"))
+
+    def purge(
+        self,
+        token: str,
+        task_ids: list[str],
+        *,
+        owned_tenants: tuple[str, ...] = (),
+        owned_queues: tuple[str, ...] = (),
+    ) -> None:
+        """Delete only keys proven to belong to this fixture run."""
+        token_bytes = token.encode("utf-8")
+        new_keys = set(self._conn.keys()) - self._keys
+        owned_keys = {key for key in new_keys if token_bytes in key}
+        for task_id in task_ids:
+            for suffix in ("", ":dispatch", ":execution"):
+                key = f"task:{task_id}{suffix}".encode()
+                if key not in self._keys:
+                    owned_keys.add(key)
+            for key in (
+                f"docling:tasks:{task_id}:metadata".encode(),
+                f"rq:job:{task_id}".encode(),
+            ):
+                if key not in self._keys:
+                    owned_keys.add(key)
+        if owned_keys:
+            self._conn.delete(*owned_keys)
+
+        current_tenants = set(self._conn.smembers("tenants:known"))
+        added_tenants = current_tenants - self._tenants
+        owned_tenants_bytes = {
+            tenant.encode("utf-8")
+            for tenant in owned_tenants
+            if tenant.encode("utf-8") in added_tenants
+        }
+        if owned_tenants_bytes:
+            self._conn.srem("tenants:known", *owned_tenants_bytes)
+        if not self._had_tenants and self._conn.scard("tenants:known") == 0:
+            self._conn.delete("tenants:known")
+
+        owned_queues_bytes = {
+            queue.encode("utf-8")
+            for queue in owned_queues
+            if queue.encode("utf-8") not in self._queues
+        }
+        if owned_queues_bytes:
+            self._conn.srem("rq:queues", *owned_queues_bytes)
+        if not self._had_queues and self._conn.scard("rq:queues") == 0:
+            self._conn.delete("rq:queues")
 
 
 class _RecordingNotifier:
@@ -218,7 +250,9 @@ def _local_orchestrator(num_workers: int = 1):
     cm.config.allow_external_plugins = False
     cm.config.max_file_size = None
     cm.convert_documents.return_value = []
-    config = LocalOrchestratorConfig(num_workers=num_workers, shared_models=True)
+    config = LocalOrchestratorConfig(
+        num_workers=num_workers, shared_models=True, enable_task_listing=True
+    )
     return LocalOrchestrator(config=config, converter_manager=cm), cm
 
 
@@ -423,12 +457,18 @@ class TestRqQueuedCancellation:
             heartbeat_key_prefix=f"docling:cancel72:{token}:alive",
             sub_channel=f"docling:cancel72:{token}:updates",
             results_ttl=600,
+            enable_task_listing=True,
         )
         orch = RQOrchestrator(config=config)
+        baseline = _RedisBaseline(sync_conn)
         created: list[str] = []
         yield orch, created
         await orch.close()
-        _purge_redis(sync_conn, token, created)
+        baseline.purge(
+            token,
+            created,
+            owned_queues=(f"rq:queue:cancel72-{token}",),
+        )
 
     async def _enqueue(self, orchestrator, created: list[str]) -> Task:
         task = await orchestrator.enqueue(
@@ -1137,9 +1177,14 @@ class TestRayQueuedCancellation:
         # Task hashes are keyed by UUID, not by tenant, so the fixture has to
         # remember the ids it created in order to purge them afterwards.
         state_manager.test_created_task_ids: list[str] = []
+        baseline = _RedisBaseline(sync_conn)
         yield state_manager
         await state_manager.disconnect()
-        _purge_redis(sync_conn, token, state_manager.test_created_task_ids)
+        baseline.purge(
+            token,
+            state_manager.test_created_task_ids,
+            owned_tenants=(f"cancel72-{token}",),
+        )
 
     async def _enqueue(self, manager, tenant_id: str, count: int = 1) -> list[Task]:
         tasks = []
@@ -1446,9 +1491,14 @@ class TestRayOrchestratorCancellation:
         orch.redis_manager = state_manager
         orch._redis_gate = RedisCallerGate(config.redis_gate_concurrency or 1)
         orch.dispatcher = None
+        baseline = _RedisBaseline(sync_conn)
         created: list[str] = []
         yield orch, created
-        _purge_redis(sync_conn, token, created)
+        baseline.purge(
+            token,
+            created,
+            owned_tenants=(f"cancel72-{token}",),
+        )
 
     async def _enqueue(self, orchestrator, created: list[str], tenant_id: str) -> Task:
         orch, _ = orchestrator
@@ -1570,6 +1620,7 @@ class TestRayDispatcherCancellation:
             results_prefix=f"docling:cancel72:{token}:results",
             sub_channel=f"docling:cancel72:{token}:updates",
         )
+        baseline = _RedisBaseline(sync_conn)
         await manager.connect()
         created: list[str] = []
         try:
@@ -1594,7 +1645,11 @@ class TestRayDispatcherCancellation:
             assert metadata.status is TaskStatus.CANCELLED
         finally:
             await manager.disconnect()
-            _purge_redis(sync_conn, token, created)
+            baseline.purge(
+                token,
+                created,
+                owned_tenants=(f"cancel72-{token}",),
+            )
 
     @pytest.mark.asyncio
     async def test_uncancelled_task_is_still_dispatched(
@@ -1605,6 +1660,7 @@ class TestRayDispatcherCancellation:
             results_prefix=f"docling:cancel72:{token}:results",
             sub_channel=f"docling:cancel72:{token}:updates",
         )
+        baseline = _RedisBaseline(sync_conn)
         await manager.connect()
         created: list[str] = []
         try:
@@ -1621,7 +1677,11 @@ class TestRayDispatcherCancellation:
             )
         finally:
             await manager.disconnect()
-            _purge_redis(sync_conn, token, created)
+            baseline.purge(
+                token,
+                created,
+                owned_tenants=(f"cancel72-{token}",),
+            )
 
     @pytest.mark.asyncio
     async def test_failed_cancellation_check_still_dispatches(self, dispatcher, token):
